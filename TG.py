@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Tooling Cycle Time Viewer", layout="wide")
 
@@ -43,6 +44,8 @@ COLOR = {
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def compute_mode(series: pd.Series, rounding: float = 0.1) -> float:
+    if series.empty:
+        return np.nan
     s = (series / rounding).round() * rounding
     m = s.mode()
     return float(m.iloc[0]) if not m.empty else np.nan
@@ -67,7 +70,7 @@ def classify(ct: float, ref: float, l1: float, l2: float) -> str:
     return "within"
 
 def detect_columns(df: pd.DataFrame):
-    ts = next((c for c in df.columns if "shot time" in c.lower()), None)
+    ts = next((c for c in df.columns if "shot time" in c.lower() or "date/time" in c.lower()), None)
     if ts is None:
         ts = next((c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None)
     actual_ct = next((c for c in df.columns if "actual" in c.lower() and "ct" in c.lower()), None)
@@ -77,7 +80,9 @@ def detect_columns(df: pd.DataFrame):
 
 def resample_view(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     g = df.set_index("shot_time").sort_index()
-    out = pd.DataFrame(index=g.resample(freq).mean().index)
+    if g.empty:
+        return pd.DataFrame(columns=["bucket", "mean_ct", "shots", "mode_ct"])
+    out = pd.DataFrame(index=g.resample(freq).mean(numeric_only=True).index)
     out["mean_ct"] = g["ct_use"].resample(freq).mean()
     out["shots"]   = g["ct_use"].resample(freq).count()
     out["mode_ct"] = g["ct_use"].resample(freq).apply(lambda s: compute_mode(s, 0.1))
@@ -91,12 +96,12 @@ def build_bands(fig, x0, x1, ref, l1, l2, label_prefix="Bands"):
     l2v = ref * (1 - l2 / 100.0)
     # Within band
     fig.add_shape(type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=l1v, y1=u1,
-                  fillcolor="lightblue", opacity=0.2, line_width=0, name=f"{label_prefix} Within")
+                  fillcolor="lightblue", opacity=0.2, line_width=0, layer="below")
     # L1 bands (upper/lower)
     fig.add_shape(type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=u1, y1=u2,
-                  fillcolor="#f3c06a", opacity=0.22, line_width=0, name=f"{label_prefix} L1 Upper")
+                  fillcolor="#f3c06a", opacity=0.22, line_width=0, layer="below")
     fig.add_shape(type="rect", xref="x", yref="y", x0=x0, x1=x1, y0=l2v, y1=l1v,
-                  fillcolor="#e6953a", opacity=0.22, line_width=0, name=f"{label_prefix} L1 Lower")
+                  fillcolor="#e6953a", opacity=0.22, line_width=0, layer="below")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main
@@ -106,7 +111,7 @@ if uploaded_file:
     ts_col, actual_ct_col, approved_col, temp_col = detect_columns(raw)
 
     if not ts_col or not actual_ct_col:
-        st.error("Couldn't detect required columns. Need a timestamp column and an 'Actual CT' column.")
+        st.error("Couldn't detect required columns. Need a timestamp column (e.g., 'Date/Time') and an 'Actual CT' column.")
         st.stop()
 
     df = raw.copy()
@@ -115,12 +120,14 @@ if uploaded_file:
     df = df.rename(columns={ts_col: "shot_time", actual_ct_col: "actual_ct"})
     df = df.sort_values("shot_time").reset_index(drop=True)
 
-    # Run Rate substitution: ct_use = Δt if Δt > prev_actual + 2s else prev_actual
+    # Run Rate substitution: ct_use = Δt if Δt > actual_ct + 2s else actual_ct
     time_diff_sec = df["shot_time"].diff().dt.total_seconds()
-    prev_actual = df["actual_ct"].shift(1)
     rounding_buffer = 2.0
-    use_gap = time_diff_sec > (prev_actual + rounding_buffer)
-    df["ct_use"] = np.where(use_gap, time_diff_sec, prev_actual)
+    # **FIXED LOGIC**: Use current 'actual_ct', not the previous one, for the comparison and default value
+    use_gap = time_diff_sec > (df["actual_ct"] + rounding_buffer)
+    df["ct_use"] = np.where(use_gap, time_diff_sec, df["actual_ct"])
+    
+    # Handle the first row which will have a NaN diff
     if pd.isna(df.loc[0, "ct_use"]):
         df.loc[0, "ct_use"] = df.loc[0, "actual_ct"]
 
@@ -143,36 +150,39 @@ if uploaded_file:
     # Choose reference for tolerance bands
     if reference_type == "Approved CT":
         reference_val = approved_ct_val
-    else:
+    else: # Mode CT
         if view_by == "Run":
-            # per-run mode
-            reference_val = np.nan  # per-run, handled in run plot
+            reference_val = np.nan  # This will be handled on a per-run basis
         else:
             reference_val = compute_mode(df_plot["ct_use"])
 
+    # **FIXED**: Initialize the figure with a secondary y-axis here, ONCE.
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
     # Build figure per view
     if view_by == "Shot":
-        fig = go.Figure()
         # classify by current reference_val
         classes = [classify(ct, reference_val, L1, L2) for ct in df_plot["ct_use"]]
         colors = [COLOR[c] for c in classes]
         fig.add_bar(x=df_plot["shot_time"], y=df_plot["ct_use"], marker_color=colors, name="Cycle Time")
 
         # bands + ref line
-        x0, x1 = df_plot["shot_time"].min(), df_plot["shot_time"].max()
-        build_bands(fig, x0, x1, reference_val, L1, L2)
-        fig.add_trace(go.Scatter(x=[x0, x1], y=[reference_val, reference_val],
-                                 mode="lines", line=dict(color=COLOR["approved"] if reference_type=="Approved CT" else COLOR["mode"]),
-                                 name=f"{reference_type}"))
-        # right axis shot count (cumulative by minute)
-        counts = df_plot.set_index("shot_time")["ct_use"].resample("15min").count()
-        fig.add_trace(go.Scatter(x=counts.index, y=counts.values, name="Shots (15m)", line=dict(dash="dot")), secondary_y=True)
+        if not df_plot.empty:
+            x0, x1 = df_plot["shot_time"].min(), df_plot["shot_time"].max()
+            build_bands(fig, x0, x1, reference_val, L1, L2)
+            fig.add_trace(go.Scatter(x=[x0, x1], y=[reference_val, reference_val],
+                                     mode="lines", line=dict(color=COLOR["approved"] if reference_type=="Approved CT" else COLOR["mode"]),
+                                     name=f"{reference_type}"))
+        
+        # **IMPROVED**: right axis shot count (cumulative)
+        df_plot['shot_num_cumulative'] = range(1, len(df_plot) + 1)
+        fig.add_trace(go.Scatter(x=df_plot["shot_time"], y=df_plot['shot_num_cumulative'], name="Cumulative Shots", line=dict(dash="dot")), secondary_y=True)
 
     elif view_by in ["Hour", "Day", "Week", "Month", "Year"]:
         freq_map = {"Hour": "H", "Day": "D", "Week": "W", "Month": "M", "Year": "Y"}
         freq = freq_map[view_by]
         view_df = resample_view(df_plot, freq)
-        fig = go.Figure()
+
         # CT line
         fig.add_trace(go.Scatter(x=view_df["bucket"], y=view_df["mean_ct"],
                                  mode="lines+markers", name=f"Mean CT ({view_by})",
@@ -191,14 +201,13 @@ if uploaded_file:
     else:  # Run view
         runs = (
             df_plot.groupby("run_id")
-                  .agg(start=("shot_time", "min"),
-                       end=("shot_time", "max"),
-                       mean_ct=("ct_use", "mean"),
-                       shots=("ct_use", "count"),
-                       mode_ct=("ct_use", lambda s: compute_mode(s, 0.1)))
-                  .reset_index()
+                   .agg(start=("shot_time", "min"),
+                        end=("shot_time", "max"),
+                        mean_ct=("ct_use", "mean"),
+                        shots=("ct_use", "count"),
+                        mode_ct=("ct_use", lambda s: compute_mode(s, 0.1)))
+                   .reset_index()
         )
-        fig = go.Figure()
         # Mean CT per run
         fig.add_trace(go.Scatter(x=runs["start"], y=runs["mean_ct"], mode="lines+markers",
                                  name="Mean CT (Run)"))
@@ -212,12 +221,13 @@ if uploaded_file:
                 build_bands(fig, x0, x1, approved_ct_val, L1, L2)
                 fig.add_trace(go.Scatter(x=[x0, x1], y=[approved_ct_val, approved_ct_val],
                                          mode="lines", line=dict(color=COLOR["approved"]), name="Approved CT"))
-        else:
-            # per-run mode bands
+        else: # per-run mode bands
             for _, r in runs.iterrows():
-                build_bands(fig, r["start"], r["end"], r["mode_ct"], L1, L2, label_prefix=f"Run {int(r['run_id'])} Bands")
+                if pd.notna(r["mode_ct"]):
+                    # **FIXED**: Don't add a legend item for every single band shape
+                    build_bands(fig, r["start"], r["end"], r["mode_ct"], L1, L2, label_prefix=f"Run {int(r['run_id'])} Bands")
             fig.add_trace(go.Scatter(x=runs["start"], y=runs["mode_ct"], mode="lines",
-                                     line=dict(color=COLOR["mode"], dash="dot"), name="Mode CT (Run)"))
+                                     line=dict(color=COLOR["mode"], dash="dot"), name="Mode CT (per Run)"))
 
     # Layout and axes
     fig.update_layout(
@@ -226,7 +236,7 @@ if uploaded_file:
         margin=dict(t=90),
     )
     fig.update_yaxes(title_text="Cycle Time (sec)", type="log" if use_log_y else "linear", secondary_y=False)
-    fig.update_yaxes(title_text="Shot Count", secondary_y=True)
+    fig.update_yaxes(title_text="Shot Count", secondary_y=True, showgrid=False)
 
     st.plotly_chart(fig, use_container_width=True)
 
