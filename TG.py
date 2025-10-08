@@ -22,7 +22,6 @@ reference_type = st.sidebar.selectbox("Reference", ["Approved CT", "Mode CT"], i
 run_threshold = st.sidebar.slider("Run threshold (hours)", 1, 24, 8)
 L1 = st.sidebar.slider("L1 Tolerance (%)", 1, 10, 5)
 L2 = st.sidebar.slider("L2 Tolerance (%)", 5, 25, 10)
-show_temp = st.sidebar.checkbox("Show temperature overlay", False)
 
 # -------------------------------------------------------------------------
 # Helper functions
@@ -74,35 +73,48 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
 
     # Detect key columns
-    ts_col = next(
-        (c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None
-    )
-    ct_col = next(
-        (c for c in df.columns if "cycle" in c.lower() or "ct" in c.lower()), None
-    )
+    ts_col = next((c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None)
+    actual_ct_col = next((c for c in df.columns if "actual" in c.lower() and "ct" in c.lower()), None)
     appr_col = next((c for c in df.columns if "approved" in c.lower()), None)
 
-    if not ts_col or not ct_col:
-        st.error("Couldn't detect timestamp or cycle time columns.")
+    if not ts_col or not actual_ct_col:
+        st.error("Couldn't detect timestamp or Actual CT columns.")
     else:
+        # Parse timestamps
         df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
         df = df.dropna(subset=[ts_col])
-        df = df.rename(columns={ts_col: "shot_time", ct_col: "ct_diff_sec"})
+        df = df.rename(columns={ts_col: "shot_time", actual_ct_col: "actual_ct"})
+        df = df.sort_values("shot_time").reset_index(drop=True)
 
+        # -----------------------------------------------------------------
+        # Create CT difference logic (Run Rate behavior)
+        # -----------------------------------------------------------------
+        time_diff_sec = df["shot_time"].diff().dt.total_seconds()
+        prev_actual_ct = df["actual_ct"].shift(1)
+        rounding_buffer = 2.0  # seconds
+        use_timestamp = time_diff_sec > (prev_actual_ct + rounding_buffer)
+
+        df["ct_diff_sec"] = np.where(use_timestamp, time_diff_sec, prev_actual_ct)
+        # For the first row, fall back to Actual CT
+        if pd.isna(df.loc[0, "ct_diff_sec"]):
+            df.loc[0, "ct_diff_sec"] = df.loc[0, "actual_ct"]
+
+        # -----------------------------------------------------------------
         # Assign runs and compute modes
+        # -----------------------------------------------------------------
         df = assign_runs(df, run_threshold)
 
-        # Safely determine Approved CT
         if appr_col and appr_col in df.columns and df[appr_col].notna().any():
             approved_ct = df[appr_col].dropna().iloc[0]
         else:
             approved_ct = compute_mode(df["ct_diff_sec"])
 
-        # Recalculate per run if run mode selected
         run_modes = df.groupby("run_id")["ct_diff_sec"].apply(compute_mode)
         df = df.merge(run_modes.rename("mode_ct"), on="run_id", how="left")
 
+        # -----------------------------------------------------------------
         # Select reference dynamically
+        # -----------------------------------------------------------------
         if reference_type == "Approved CT":
             df["reference_ct"] = approved_ct
         else:
@@ -111,7 +123,9 @@ if uploaded_file:
             else:
                 df["reference_ct"] = compute_mode(df["ct_diff_sec"])
 
+        # -----------------------------------------------------------------
         # Classify deviations
+        # -----------------------------------------------------------------
         df["deviation_class"] = [
             classify_deviation(ct, ref, L1, L2)
             for ct, ref in zip(df["ct_diff_sec"], df["reference_ct"])
@@ -137,7 +151,6 @@ if uploaded_file:
         lower_l1 = ref_val * (1 - L1 / 100)
         lower_l2 = ref_val * (1 - L2 / 100)
 
-        # Add reference and tolerance bands
         fig.add_hline(
             y=ref_val,
             line_color="green",
@@ -145,28 +158,16 @@ if uploaded_file:
             annotation_position="top left",
         )
         fig.add_hrect(
-            y0=lower_l1,
-            y1=upper_l1,
-            fillcolor="lightblue",
-            opacity=0.2,
-            line_width=0,
-            annotation_text="Within",
+            y0=lower_l1, y1=upper_l1,
+            fillcolor="lightblue", opacity=0.2, line_width=0, annotation_text="Within"
         )
         fig.add_hrect(
-            y0=lower_l2,
-            y1=lower_l1,
-            fillcolor="orange",
-            opacity=0.2,
-            line_width=0,
-            annotation_text="L1 Lower",
+            y0=lower_l2, y1=lower_l1,
+            fillcolor="orange", opacity=0.2, line_width=0, annotation_text="L1 Lower"
         )
         fig.add_hrect(
-            y0=upper_l1,
-            y1=upper_l2,
-            fillcolor="orange",
-            opacity=0.2,
-            line_width=0,
-            annotation_text="L1 Upper",
+            y0=upper_l1, y1=upper_l2,
+            fillcolor="orange", opacity=0.2, line_width=0, annotation_text="L1 Upper"
         )
 
         fig.update_layout(
@@ -179,12 +180,12 @@ if uploaded_file:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Optional data preview
+        # Data preview
         st.subheader("Data Preview")
         st.dataframe(df.head(10))
 
         st.markdown(
-            f"**Detected columns:** Timestamp = `{ts_col}`, Cycle Time = `{ct_col}`, Approved CT = `{appr_col}`"
+            f"**Detected columns:** Timestamp = `{ts_col}`, Actual CT = `{actual_ct_col}`, Approved CT = `{appr_col}`"
         )
 else:
     st.info("Please upload a file to begin.")
