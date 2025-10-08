@@ -1,77 +1,51 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from datetime import timedelta
-
-st.set_page_config(page_title="Tooling Cycle Time Viewer", layout="wide")
-
-st.title("🛠️ Tooling Cycle Time Viewer")
-st.markdown("Upload a tooling run data file to explore cycle time, tolerances, and run segmentation.")
-
-uploaded_file = st.file_uploader("Upload Excel file (e.g., MO-442_2025-10-07.xlsx)", type=["xlsx", "xls"])
-
-# Sidebar controls
-st.sidebar.header("Graph Controls")
-view_by = st.sidebar.selectbox("View by", ["Shot", "Hour", "Day", "Week", "Month", "Year", "Run"], index=2)
-reference_type = st.sidebar.selectbox("Reference", ["Approved CT", "Mode CT"], index=0)
-run_threshold = st.sidebar.slider("Run threshold (hours)", 1, 24, 8)
-L1 = st.sidebar.slider("L1 Tolerance (%)", 1, 10, 5)
-L2 = st.sidebar.slider("L2 Tolerance (%)", 5, 25, 10)
-show_temp = st.sidebar.checkbox("Show temperature overlay", False)
-
-# Helper functions
-def compute_mode(series, rounding=0.1):
-    s = (series / rounding).round() * rounding
-    return s.mode().iloc[0] if not s.mode().empty else np.nan
-
-def assign_runs(df, threshold_hours=8):
-    df = df.sort_values("shot_time")
-    gaps = df["shot_time"].diff()
-    run_id = (gaps > pd.Timedelta(hours=threshold_hours)).cumsum()
-    df["run_id"] = run_id
-    return df
-
-def classify_deviation(ct, ref, l1, l2):
-    if pd.isna(ct) or pd.isna(ref):
-        return "within"
-    if ct > ref * (1 + l2 / 100):
-        return "hi_l2"
-    elif ct > ref * (1 + l1 / 100):
-        return "hi_l1"
-    elif ct < ref * (1 - l2 / 100):
-        return "lo_l2"
-    elif ct < ref * (1 - l1 / 100):
-        return "lo_l1"
-    else:
-        return "within"
-
-color_map = {
-    "within": "#3498db",
-    "hi_l1": "#f3c06a",
-    "hi_l2": "#e74c3c",
-    "lo_l1": "#e6953a",
-    "lo_l2": "#b03a2e",
-}
-
-if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-
-    # Detect timestamp and CT columns
-    ts_col = next((c for c in df.columns if "time" in c.lower() or "date" in c.lower()), None)
-    ct_col = next((c for c in df.columns if "cycle" in c.lower() or "ct" in c.lower()), None)
-    appr_col = next((c for c in df.columns if "approved" in c.lower()), None)
-
-    if not ts_col or not ct_col:
-        st.error("Couldn't detect timestamp or cycle time columns.")
-    else:
-        df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce')
-        df = df.dropna(subset=[ts_col])
-        df = df.rename(columns={ts_col: "shot_time", ct_col: "ct_diff_sec"})
-
-        # Assign runs and compute mode
-        df = assign_runs(df, run_threshold)
-        approved_ct = df[appr_col].dropna().iloc[0] if appr_col and df[appr_col].notna().any() else compute_mode(df["ct_diff_sec"])
+Requirements
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
 
         # Recalculate per run if run mode selected
         run_modes = df.groupby('run_id')['ct_diff_sec'].apply(compute_mode)
