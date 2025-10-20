@@ -105,24 +105,33 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         return go.Figure()
 
     fig = go.Figure()
+
+    # --- Create the main bar chart trace with correct colors ---
+    df['color'] = df['part_status'].map(STATUS_COLORS)
+    fig.add_trace(go.Bar(
+        x=df['shot_time'],
+        y=df['actual_ct'],
+        marker_color=df['color'],
+        name='Cycle Time',
+        showlegend=False
+    ))
+
+    # --- Add dummy traces for a custom legend ---
+    for status, color in STATUS_COLORS.items():
+        fig.add_trace(go.Bar(
+            x=[None], y=[None],
+            marker_color=color,
+            name=status,
+            showlegend=True
+        ))
     
-    # Add a dummy trace for the pause line legend
     fig.add_trace(go.Scatter(
         x=[None], y=[None],
         mode='lines',
         line=dict(color='purple', dash='dash', width=1.5),
-        name='Production Pause'
+        name='Production Pause',
+        showlegend=True
     ))
-
-    # Plot each status as a separate trace for the legend
-    for status, color in STATUS_COLORS.items():
-        df_status = df[df['part_status'] == status]
-        fig.add_trace(go.Bar(
-            x=df_status['shot_time'],
-            y=df_status['actual_ct'],
-            marker_color=color,
-            name=status
-        ))
 
     # Add tolerance lines
     fig.add_hline(y=approved_ct, line_dash="dot", line_color="grey",
@@ -135,7 +144,6 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
     # Add vertical lines for production pauses
     pause_times = df[df['is_pause_before']]['shot_time']
     for p_time in pause_times:
-        # Removed annotation from vline to fix TypeError
         fig.add_vline(x=p_time, line_width=1.5, line_dash="dash", line_color="purple")
 
     # Set y-axis range dynamically
@@ -146,8 +154,8 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         xaxis_title="Shot Time",
         yaxis_title="Actual Cycle Time (seconds)",
         yaxis_range=[0, y_axis_max],
-        legend_title_text='Part Status',
-        barmode='stack'
+        legend_title_text='Legend',
+        bargap=0.1
     )
     return fig
 
