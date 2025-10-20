@@ -67,33 +67,35 @@ class WarrantyFilter:
         is_bad_cycle = (df['actual_ct'] > self.ct_upper_limit) | (df['actual_ct'] < self.ct_lower_limit)
         df.loc[is_bad_cycle, 'part_status'] = 'Bad (Post-Pause)'
 
-        # --- NEW: Identify and Re-classify Blank Shots with Upper and Lower Bounds (Priority 1) ---
+        # --- Identify Pauses and Stability ---
+        df['is_pause_before'] = df['time_diff_minutes'] > self.pause_minutes
+        df['pause_in_window'] = df['is_pause_before'].rolling(window=self.stable_period_shots, min_periods=1).max()
+        is_stable = df['pause_in_window'] != 1.0
+
+        # --- Blank Shot Classification (Highest Priority) ---
         is_blank_shot = (df['actual_ct'] > self.blank_shot_upper_threshold) | (df['actual_ct'] < self.blank_shot_lower_threshold)
         df.loc[is_blank_shot, 'part_status'] = 'Blank Shot - Excluded'
         df.loc[is_blank_shot, 'affects_warranty'] = False
 
-        # --- Identify and Re-classify Startup Shots ---
-        df['is_pause_before'] = df['time_diff_minutes'] > self.pause_minutes
-        pause_indices = df[df['is_pause_before']].index
+        # --- Scrap Shot Classification (NEW LOGIC) ---
+        # A shot is scrap if it's a bad cycle that is either part of a stable run OR the first shot after a pause.
+        is_scrap_condition = is_stable | df['is_pause_before']
+        is_scrap = (df['part_status'] == 'Bad (Post-Pause)') & is_scrap_condition
+        df.loc[is_scrap, 'part_status'] = 'Scrap'
 
+        # --- Startup Shot Classification (Now applies to shots 2, 3, etc. after a pause) ---
+        pause_indices = df[df['is_pause_before']].index
         for idx in pause_indices:
-            startup_range_start = idx
-            startup_range_end = min(idx + self.startup_shots_count, len(df))
+            # Start from the SECOND shot after the pause (index + 1)
+            startup_range_start = idx + 1 
+            # The startup count now includes the first shot, so we add 1 to the end range
+            startup_range_end = min(idx + self.startup_shots_count + 1, len(df))
             
             for startup_idx in range(startup_range_start, startup_range_end):
-                # Only reclassify if it's currently a 'Bad (Post-Pause)' shot.
-                # This prevents overwriting a 'Blank Shot' that happens to be near startup.
                 if df.loc[startup_idx, 'part_status'] == 'Bad (Post-Pause)':
                     df.loc[startup_idx, 'part_status'] = 'Startup - Bad'
                     df.loc[startup_idx, 'affects_warranty'] = False
         
-        # --- Identify and Re-classify Scrap Shots ---
-        df['pause_in_window'] = df['is_pause_before'].rolling(window=self.stable_period_shots, min_periods=1).max()
-        is_stable = df['pause_in_window'] != 1.0
-
-        is_scrap = (df['part_status'] == 'Bad (Post-Pause)') & is_stable
-        df.loc[is_scrap, 'part_status'] = 'Scrap'
-
         # --- Final Metrics Calculation ---
         total_shots = len(df)
         summary = {
@@ -102,7 +104,7 @@ class WarrantyFilter:
             "Good Parts": (df['part_status'] == 'Good').sum(),
             "Scrap Parts": (df['part_status'] == 'Scrap').sum(),
             "Discounted Startup Shots (Bad)": (df['part_status'] == 'Startup - Bad').sum(),
-            "Blank Shots (Excluded)": (df['part_status'] == 'Blank Shot - Excluded').sum(), # New metric
+            "Blank Shots (Excluded)": (df['part_status'] == 'Blank Shot - Excluded').sum(),
             "Other Bad Cycles (Post-Pause)": (df['part_status'] == 'Bad (Post-Pause)').sum()
         }
         
