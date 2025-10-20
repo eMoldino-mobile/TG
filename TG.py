@@ -101,10 +101,18 @@ class WarrantyFilter:
 def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
     """Creates a Plotly bar chart of the shot analysis."""
     if df.empty:
-        st.info("No data to display.")
+        st.info("No data to display for the selected date.")
         return go.Figure()
 
     fig = go.Figure()
+    
+    # Add a dummy trace for the pause line legend
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None],
+        mode='lines',
+        line=dict(color='purple', dash='dash', width=1.5),
+        name='Production Pause'
+    ))
 
     # Plot each status as a separate trace for the legend
     for status, color in STATUS_COLORS.items():
@@ -127,11 +135,11 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
     # Add vertical lines for production pauses
     pause_times = df[df['is_pause_before']]['shot_time']
     for p_time in pause_times:
-        fig.add_vline(x=p_time, line_width=1, line_dash="dash", line_color="purple",
-                      annotation_text="Pause", annotation_position="top left")
+        # Removed annotation from vline to fix TypeError
+        fig.add_vline(x=p_time, line_width=1.5, line_dash="dash", line_color="purple")
 
     # Set y-axis range dynamically
-    y_axis_max = max(df['actual_ct'].max() * 1.1, upper_limit * 1.5)
+    y_axis_max = max(df['actual_ct'].max() * 1.1, upper_limit * 1.5) if not df.empty else approved_ct * 2
     
     fig.update_layout(
         title="Shot-by-Shot Cycle Time Analysis",
@@ -163,6 +171,20 @@ if uploaded_file:
 
     # If the check passes, proceed with loading the file and setting up controls
     st.sidebar.success(f"File '{uploaded_file.name}' loaded successfully!")
+    
+    # --- Date Filter ---
+    df_input['shot_time'] = pd.to_datetime(df_input['shot_time'], errors='coerce')
+    df_input.dropna(subset=['shot_time'], inplace=True)
+    df_input['date'] = df_input['shot_time'].dt.date
+    available_dates = sorted(df_input["date"].unique())
+    
+    selected_date = st.sidebar.selectbox(
+        "Select Date to Analyze",
+        options=available_dates,
+        index=len(available_dates) - 1,  # Default to the last date
+        format_func=lambda d: pd.to_datetime(d).strftime('%d %b %Y')
+    )
+
     st.sidebar.markdown("---")
     
     # Use the first valid value from the mandatory 'approved_ct' column
@@ -205,11 +227,14 @@ if uploaded_file:
         )
         
     # --- Main Panel ---
-    st.header("Analysis Results")
+    st.header(f"Analysis Results for {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
+
+    # Filter data based on selected date
+    df_filtered = df_input[df_input['date'] == selected_date].copy()
 
     # Perform analysis
     analyzer = WarrantyFilter(
-        df=df_input,
+        df=df_filtered,
         approved_ct=approved_ct,
         pause_minutes=pause_minutes,
         ct_upper_pct=ct_upper_pct,
@@ -219,7 +244,7 @@ if uploaded_file:
     )
     results = analyzer.results
     
-    if results:
+    if results and not results.get("processed_df", pd.DataFrame()).empty:
         summary_metrics = results.get("summary_metrics", {})
         processed_df = results.get("processed_df", pd.DataFrame())
 
@@ -289,6 +314,8 @@ if uploaded_file:
                 'Shot Time', 'Actual CT', 'Part Status', 'Affects Warranty', 
                 'Minutes Since Last Shot', 'Preceded by Pause'
             ]])
+    else:
+        st.warning(f"No shot data found for the selected date: {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
 else:
     st.info("👈 Please upload an Excel file to begin the analysis.")
