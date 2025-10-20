@@ -19,6 +19,7 @@ STATUS_COLORS = {
 class WarrantyFilter:
     """
     Analyzes shot data to filter shots for warranty and end-of-life purposes.
+    It expects a DataFrame with standardized column names (lowercase, snake_case).
     """
     def __init__(self, df: pd.DataFrame, approved_ct: float, pause_minutes: int,
                  ct_upper_pct: float, ct_lower_pct: float, startup_shots_count: int,
@@ -35,12 +36,13 @@ class WarrantyFilter:
     def _prepare_data(self) -> pd.DataFrame:
         """Prepares the raw DataFrame for analysis."""
         df = self.df_raw.copy()
-        if "SHOT TIME" not in df.columns or "Actual CT" not in df.columns:
+        # Expects standardized columns 'shot_time' and 'actual_ct'
+        if "shot_time" not in df.columns or "actual_ct" not in df.columns:
             st.error("Input data must contain 'SHOT TIME' and 'Actual CT' columns.")
             return pd.DataFrame()
 
-        df["shot_time"] = pd.to_datetime(df["SHOT TIME"], errors="coerce")
-        df = df.dropna(subset=["shot_time", "Actual CT"]).sort_values("shot_time").reset_index(drop=True)
+        df["shot_time"] = pd.to_datetime(df["shot_time"], errors="coerce")
+        df = df.dropna(subset=["shot_time", "actual_ct"]).sort_values("shot_time").reset_index(drop=True)
         
         if df.empty:
             return pd.DataFrame()
@@ -59,28 +61,23 @@ class WarrantyFilter:
         df['part_status'] = 'Good'
         df['affects_warranty'] = True
         
-        is_bad_cycle = (df['Actual CT'] > self.ct_upper_limit) | (df['Actual CT'] < self.ct_lower_limit)
+        is_bad_cycle = (df['actual_ct'] > self.ct_upper_limit) | (df['actual_ct'] < self.ct_lower_limit)
         df.loc[is_bad_cycle, 'part_status'] = 'Bad (Post-Pause)'
 
         # --- Identify and Re-classify Startup Shots ---
-        # A startup shot is one of the first N shots after a long pause.
         df['is_pause_before'] = df['time_diff_minutes'] > self.pause_minutes
         pause_indices = df[df['is_pause_before']].index
 
         for idx in pause_indices:
-            # The range of startup shots starts at the shot immediately after the pause.
             startup_range_start = idx
             startup_range_end = min(idx + self.startup_shots_count, len(df))
             
             for startup_idx in range(startup_range_start, startup_range_end):
-                # If a shot within this startup window is bad, we re-classify it and discount it.
-                if is_bad_cycle[startup_idx]:
+                if is_bad_cycle.at[startup_idx]:
                     df.loc[startup_idx, 'part_status'] = 'Startup - Bad'
                     df.loc[startup_idx, 'affects_warranty'] = False
         
         # --- Identify and Re-classify Scrap Shots ---
-        # A scrap shot is a bad shot that occurs during a stable production period.
-        # We define "stable" as a period not recently preceded by a long pause.
         df['pause_in_window'] = df['is_pause_before'].rolling(window=self.stable_period_shots, min_periods=1).max()
         is_stable = df['pause_in_window'] != 1.0
 
@@ -114,7 +111,7 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         df_status = df[df['part_status'] == status]
         fig.add_trace(go.Bar(
             x=df_status['shot_time'],
-            y=df_status['Actual CT'],
+            y=df_status['actual_ct'],
             marker_color=color,
             name=status
         ))
@@ -134,7 +131,7 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
                       annotation_text="Pause", annotation_position="top left")
 
     # Set y-axis range dynamically
-    y_axis_max = max(df['Actual CT'].max() * 1.1, upper_limit * 1.5)
+    y_axis_max = max(df['actual_ct'].max() * 1.1, upper_limit * 1.5)
     
     fig.update_layout(
         title="Shot-by-Shot Cycle Time Analysis",
@@ -142,7 +139,7 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         yaxis_title="Actual Cycle Time (seconds)",
         yaxis_range=[0, y_axis_max],
         legend_title_text='Part Status',
-        barmode='stack' # Use stack to ensure timestamps don't overlap if statuses are mixed
+        barmode='stack'
     )
     return fig
 
@@ -155,13 +152,27 @@ uploaded_file = st.sidebar.file_uploader("Upload your shot data Excel file", typ
 
 if uploaded_file:
     df_input = pd.read_excel(uploaded_file)
-    st.sidebar.success(f"File '{uploaded_file.name}' loaded successfully!")
+    
+    # Standardize column names to handle different cases (e.g., 'SHOT TIME', 'Shot Time', 'shot_time')
+    df_input.columns = [col.strip().lower().replace(' ', '_') for col in df_input.columns]
 
+    # --- MANDATORY CHECK for 'approved_ct' column ---
+    if 'approved_ct' not in df_input.columns or df_input['approved_ct'].dropna().empty:
+        st.error("Error: The uploaded Excel file must contain a column named 'APPROVED CT' with at least one valid number.")
+        st.stop()  # Stop the app if the column is missing or empty
+
+    # If the check passes, proceed with loading the file and setting up controls
+    st.sidebar.success(f"File '{uploaded_file.name}' loaded successfully!")
     st.sidebar.markdown("---")
+    
+    # Use the first valid value from the mandatory 'approved_ct' column
+    default_approved_ct = df_input['approved_ct'].dropna().iloc[0]
+    st.sidebar.info(f"Using 'Approved CT' from file: {default_approved_ct:.2f}s")
+
     approved_ct = st.sidebar.number_input(
         "Approved Cycle Time (seconds)",
-        min_value=0.1, value=df_input['Actual CT'].median() if 'Actual CT' in df_input else 10.0, step=0.1,
-        help="The reference cycle time for your process."
+        min_value=0.1, value=float(default_approved_ct), step=0.1,
+        help="This value is automatically populated from the 'APPROVED CT' column in your file."
     )
     
     with st.sidebar.expander("Threshold Settings", expanded=True):
@@ -263,10 +274,22 @@ if uploaded_file:
 
         # --- Display Data Table ---
         with st.expander("View Detailed Shot Data"):
-            st.dataframe(processed_df[[
-                'shot_time', 'Actual CT', 'part_status', 'affects_warranty', 
-                'time_diff_minutes', 'is_pause_before'
+            # Create a copy for display with more readable column names
+            df_display = processed_df.copy()
+            df_display.rename(columns={
+                'shot_time': 'Shot Time',
+                'actual_ct': 'Actual CT',
+                'part_status': 'Part Status',
+                'affects_warranty': 'Affects Warranty',
+                'time_diff_minutes': 'Minutes Since Last Shot',
+                'is_pause_before': 'Preceded by Pause'
+            }, inplace=True)
+            
+            st.dataframe(df_display[[
+                'Shot Time', 'Actual CT', 'Part Status', 'Affects Warranty', 
+                'Minutes Since Last Shot', 'Preceded by Pause'
             ]])
 
 else:
     st.info("👈 Please upload an Excel file to begin the analysis.")
+
