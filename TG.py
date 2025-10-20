@@ -24,7 +24,7 @@ class WarrantyFilter:
     """
     def __init__(self, df: pd.DataFrame, approved_ct: float, pause_minutes: int,
                  ct_upper_pct: float, ct_lower_pct: float, startup_shots_count: int,
-                 stable_period_shots: int, blank_shot_upper_threshold: float, blank_shot_lower_threshold: float):
+                 stable_period_shots: int, blank_shot_upper_pct: float, blank_shot_lower_pct: float):
         self.df_raw = df.copy()
         self.approved_ct = approved_ct
         self.pause_minutes = pause_minutes
@@ -32,8 +32,9 @@ class WarrantyFilter:
         self.ct_lower_limit = approved_ct * (1 - ct_lower_pct / 100)
         self.startup_shots_count = startup_shots_count
         self.stable_period_shots = stable_period_shots
-        self.blank_shot_upper_threshold = blank_shot_upper_threshold # New upper threshold
-        self.blank_shot_lower_threshold = blank_shot_lower_threshold # New lower threshold
+        # Convert percentages to absolute second thresholds internally
+        self.blank_shot_upper_threshold = approved_ct * (blank_shot_upper_pct / 100)
+        self.blank_shot_lower_threshold = approved_ct * (blank_shot_lower_pct / 100)
         self.results = self._analyze_shots()
 
     def _prepare_data(self) -> pd.DataFrame:
@@ -236,16 +237,22 @@ if uploaded_file:
         )
 
     with st.sidebar.expander("Warranty & Scrap Logic Settings"):
-        blank_shot_upper_threshold = st.slider(
-            "Blank Shot Upper Threshold (seconds)",
-            min_value=50, max_value=1000, value=300,
-            help="Any 'Actual CT' ABOVE this is a non-production event and will not affect warranty."
+        blank_shot_upper_pct = st.slider(
+            "Blank Shot Upper Threshold (%)",
+            min_value=101, max_value=1000, value=500,
+            help="Any 'Actual CT' ABOVE this percentage of 'Approved CT' is a non-production event."
         )
-        blank_shot_lower_threshold = st.slider(
-            "Blank Shot Lower Threshold (seconds)",
-            min_value=0, max_value=10, value=2,
-            help="Any 'Actual CT' BELOW this is a non-production event and will not affect warranty."
+        blank_shot_upper_seconds = approved_ct * (blank_shot_upper_pct / 100)
+        st.sidebar.markdown(f"> _Corresponds to: **{blank_shot_upper_seconds:.2f} seconds**_")
+
+        blank_shot_lower_pct = st.slider(
+            "Blank Shot Lower Threshold (%)",
+            min_value=1, max_value=99, value=20,
+            help="Any 'Actual CT' BELOW this percentage of 'Approved CT' is a non-production event."
         )
+        blank_shot_lower_seconds = approved_ct * (blank_shot_lower_pct / 100)
+        st.sidebar.markdown(f"> _Corresponds to: **{blank_shot_lower_seconds:.2f} seconds**_")
+        
         startup_shots_count = st.slider(
             "Startup Shots to Discount",
             min_value=0, max_value=50, value=5,
@@ -272,8 +279,8 @@ if uploaded_file:
         ct_lower_pct=ct_lower_pct,
         startup_shots_count=startup_shots_count,
         stable_period_shots=stable_period_shots,
-        blank_shot_upper_threshold=blank_shot_upper_threshold,
-        blank_shot_lower_threshold=blank_shot_lower_threshold
+        blank_shot_upper_pct=blank_shot_upper_pct,
+        blank_shot_lower_pct=blank_shot_lower_pct
     )
     results = analyzer.results
     
