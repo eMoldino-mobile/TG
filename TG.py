@@ -12,7 +12,8 @@ STATUS_COLORS = {
     'Good': '#2ecc71',
     'Scrap': '#e74c3c',
     'Startup - Bad': '#f39c12',
-    'Bad (Post-Pause)': '#3498db'
+    'Bad (Post-Pause)': '#3498db',
+    'Blank Shot - Excluded': '#9b59b6' # New color for blank shots
 }
 
 # --- Core Calculation Class ---
@@ -23,7 +24,7 @@ class WarrantyFilter:
     """
     def __init__(self, df: pd.DataFrame, approved_ct: float, pause_minutes: int,
                  ct_upper_pct: float, ct_lower_pct: float, startup_shots_count: int,
-                 stable_period_shots: int):
+                 stable_period_shots: int, blank_shot_upper_threshold: float, blank_shot_lower_threshold: float):
         self.df_raw = df.copy()
         self.approved_ct = approved_ct
         self.pause_minutes = pause_minutes
@@ -31,6 +32,8 @@ class WarrantyFilter:
         self.ct_lower_limit = approved_ct * (1 - ct_lower_pct / 100)
         self.startup_shots_count = startup_shots_count
         self.stable_period_shots = stable_period_shots
+        self.blank_shot_upper_threshold = blank_shot_upper_threshold # New upper threshold
+        self.blank_shot_lower_threshold = blank_shot_lower_threshold # New lower threshold
         self.results = self._analyze_shots()
 
     def _prepare_data(self) -> pd.DataFrame:
@@ -64,6 +67,11 @@ class WarrantyFilter:
         is_bad_cycle = (df['actual_ct'] > self.ct_upper_limit) | (df['actual_ct'] < self.ct_lower_limit)
         df.loc[is_bad_cycle, 'part_status'] = 'Bad (Post-Pause)'
 
+        # --- NEW: Identify and Re-classify Blank Shots with Upper and Lower Bounds (Priority 1) ---
+        is_blank_shot = (df['actual_ct'] > self.blank_shot_upper_threshold) | (df['actual_ct'] < self.blank_shot_lower_threshold)
+        df.loc[is_blank_shot, 'part_status'] = 'Blank Shot - Excluded'
+        df.loc[is_blank_shot, 'affects_warranty'] = False
+
         # --- Identify and Re-classify Startup Shots ---
         df['is_pause_before'] = df['time_diff_minutes'] > self.pause_minutes
         pause_indices = df[df['is_pause_before']].index
@@ -73,7 +81,9 @@ class WarrantyFilter:
             startup_range_end = min(idx + self.startup_shots_count, len(df))
             
             for startup_idx in range(startup_range_start, startup_range_end):
-                if is_bad_cycle.at[startup_idx]:
+                # Only reclassify if it's currently a 'Bad (Post-Pause)' shot.
+                # This prevents overwriting a 'Blank Shot' that happens to be near startup.
+                if df.loc[startup_idx, 'part_status'] == 'Bad (Post-Pause)':
                     df.loc[startup_idx, 'part_status'] = 'Startup - Bad'
                     df.loc[startup_idx, 'affects_warranty'] = False
         
@@ -92,6 +102,7 @@ class WarrantyFilter:
             "Good Parts": (df['part_status'] == 'Good').sum(),
             "Scrap Parts": (df['part_status'] == 'Scrap').sum(),
             "Discounted Startup Shots (Bad)": (df['part_status'] == 'Startup - Bad').sum(),
+            "Blank Shots (Excluded)": (df['part_status'] == 'Blank Shot - Excluded').sum(), # New metric
             "Other Bad Cycles (Post-Pause)": (df['part_status'] == 'Bad (Post-Pause)').sum()
         }
         
@@ -223,6 +234,16 @@ if uploaded_file:
         )
 
     with st.sidebar.expander("Warranty & Scrap Logic Settings"):
+        blank_shot_upper_threshold = st.slider(
+            "Blank Shot Upper Threshold (seconds)",
+            min_value=50, max_value=1000, value=300,
+            help="Any 'Actual CT' ABOVE this is a non-production event and will not affect warranty."
+        )
+        blank_shot_lower_threshold = st.slider(
+            "Blank Shot Lower Threshold (seconds)",
+            min_value=0, max_value=10, value=2,
+            help="Any 'Actual CT' BELOW this is a non-production event and will not affect warranty."
+        )
         startup_shots_count = st.slider(
             "Startup Shots to Discount",
             min_value=0, max_value=50, value=5,
@@ -248,7 +269,9 @@ if uploaded_file:
         ct_upper_pct=ct_upper_pct,
         ct_lower_pct=ct_lower_pct,
         startup_shots_count=startup_shots_count,
-        stable_period_shots=stable_period_shots
+        stable_period_shots=stable_period_shots,
+        blank_shot_upper_threshold=blank_shot_upper_threshold,
+        blank_shot_lower_threshold=blank_shot_lower_threshold
     )
     results = analyzer.results
     
@@ -258,7 +281,7 @@ if uploaded_file:
 
         # --- Display Summary Metrics ---
         st.subheader("Summary")
-        cols = st.columns(3)
+        cols = st.columns(4) # Changed to 4 columns for new metric
         with cols[0]:
             st.metric(
                 label="Total Accumulated Shots",
@@ -268,14 +291,18 @@ if uploaded_file:
             st.metric(
                 label="Adjusted Shots (Affects Warranty)",
                 value=f"{summary_metrics.get('Adjusted Accumulated Shots (Affects Warranty)', 0):,}",
-                delta=f"-{summary_metrics.get('Discounted Startup Shots (Bad)', 0)} shots",
-                delta_color="inverse",
-                help="Total shots minus the bad cycles that occurred during startup."
+                help="Total shots minus discounted startup and blank shots."
             )
         with cols[2]:
              st.metric(
                 label="Good Parts",
                 value=f"{summary_metrics.get('Good Parts', 0):,}"
+            )
+        with cols[3]:
+             st.metric(
+                label="Scrap Parts",
+                value=f"{summary_metrics.get('Scrap Parts', 0):,}",
+                help="Bad cycle shots that occurred during stable production."
             )
         
         st.markdown("---")
@@ -283,21 +310,21 @@ if uploaded_file:
         cols2 = st.columns(3)
         with cols2[0]:
             st.metric(
-                label="Scrap Parts",
-                value=f"{summary_metrics.get('Scrap Parts', 0):,}",
-                help="Bad cycle shots that occurred during stable production."
-            )
-        with cols2[1]:
-            st.metric(
                 label="Discounted Startup Shots",
                 value=f"{summary_metrics.get('Discounted Startup Shots (Bad)', 0):,}",
                 help="Bad cycle shots immediately following a pause. These do not count towards warranty."
+            )
+        with cols2[1]:
+            st.metric(
+                label="Blank Shots (Excluded)",
+                value=f"{summary_metrics.get('Blank Shots (Excluded)', 0):,}",
+                help="Cycles with an extremely long or short CT, considered non-production events. Do not affect warranty."
             )
         with cols2[2]:
             st.metric(
                 label="Other Bad Cycles",
                 value=f"{summary_metrics.get('Other Bad Cycles (Post-Pause)', 0):,}",
-                help="Bad cycle shots that are not scrap and not discounted startup shots."
+                help="Bad cycle shots that are not scrap and not discounted."
             )
 
         # --- Display Plot ---
