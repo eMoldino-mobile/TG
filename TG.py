@@ -28,7 +28,8 @@ class WarrantyFilter:
                  stable_period_shots: int, blank_shot_upper_dev_pct: float, 
                  blank_shot_lower_dev_pct: float, shot_config: dict):
         
-        self.df_raw = df.copy()
+        # Carry over all original columns
+        self.df_raw = df.copy() 
         self.approved_ct = approved_ct
         self.pause_minutes = pause_minutes
         self.ct_upper_limit = approved_ct * (1 + ct_upper_pct / 100)
@@ -37,7 +38,7 @@ class WarrantyFilter:
         self.stable_period_shots = stable_period_shots
         self.blank_shot_upper_threshold = approved_ct * (1 + blank_shot_upper_dev_pct / 100)
         self.blank_shot_lower_threshold = approved_ct * (1 - blank_shot_lower_dev_pct / 100)
-        self.shot_config = shot_config # New: Store the configuration
+        self.shot_config = shot_config 
 
     def _prepare_data(self) -> pd.DataFrame:
         """Prepares the raw DataFrame for analysis."""
@@ -165,7 +166,7 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
     
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode='lines',
-        line=dict(color='purple', dash='dash', width=1.5),
+        line=dict(color='purple', dash='dash', width=1.E_m_c_2),
         name='Production Pause', showlegend=True
     ))
 
@@ -201,6 +202,8 @@ uploaded_file = st.sidebar.file_uploader("Upload your shot data Excel file", typ
 
 if uploaded_file:
     df_input = pd.read_excel(uploaded_file)
+    # Store original columns before standardizing
+    original_columns = list(df_input.columns) 
     df_input.columns = [col.strip().lower().replace(' ', '_') for col in df_input.columns]
 
     if 'approved_ct' not in df_input.columns or df_input['approved_ct'].dropna().empty:
@@ -297,6 +300,9 @@ if uploaded_file:
     
     st.header(f"Analysis Results for {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
+    # We pass the original df_input columns to the filter
+    # The filter class will only use what it needs (shot_time, actual_ct)
+    # but it will carry over the rest of the columns
     df_filtered = df_input[df_input['date'] == selected_date].copy()
 
     # Instantiate the analyzer with the new config
@@ -340,21 +346,47 @@ if uploaded_file:
         fig = plot_shot_analysis(processed_df, analyzer.approved_ct, analyzer.ct_upper_limit, analyzer.ct_lower_limit)
         st.plotly_chart(fig, use_container_width=True)
 
+        # --- FIX IS HERE ---
         with st.expander("View Detailed Shot Data"):
             df_display = processed_df.copy()
-            # Rename columns for clarity in the table
-            df_display.rename(columns={
+            
+            # Define the 7 columns we are renaming
+            rename_map = {
                 'shot_time': 'Shot Time', 'actual_ct': 'Actual CT',
                 'part_status': 'Classification', 
                 'is_scrap': 'Is Scrap? (Config)', 
                 'affects_warranty': 'Affects Warranty? (Config)',
                 'time_diff_minutes': 'Minutes Since Last Shot', 
                 'is_pause_before': 'Preceded by Pause'
-            }, inplace=True)
-            st.dataframe(df_display[[
-                'Shot Time', 'Actual CT', 'Classification', 'Is Scrap? (Config)', 
-                'Affects Warranty? (Config)', 'Minutes Since Last Shot', 'Preceded by Pause'
-            ] + [col for col in df_input.columns if col not in df_display.columns and col not in ['date', 'approved_ct']]]) # Show original columns too
+            }
+            df_display.rename(columns=rename_map, inplace=True)
+            
+            # These are the 7 columns we want to show first, in order
+            pretty_cols_ordered = list(rename_map.values())
+            
+            # These are the original (snake_case) names of the columns we renamed
+            internal_cols_renamed = list(rename_map.keys())
+            
+            # Find all *other* columns from the original file that weren't renamed
+            # and aren't the date/ct helpers.
+            # We check against df_input.columns to get all original columns.
+            other_original_cols = [
+                col for col in df_input.columns 
+                if col not in internal_cols_renamed and col not in ['date', 'approved_ct']
+            ]
+            
+            # Combine the lists and display
+            # This ensures all original data (like 'operator_name', etc.)
+            # that was in df_input is also shown here.
+            
+            # Final check: only include other_original_cols if they actually
+            # exist in the final df_display (which they should, as they're
+            # carried over from df_raw)
+            final_other_cols = [col for col in other_original_cols if col in df_display.columns]
+            
+            st.dataframe(df_display[pretty_cols_ordered + final_other_cols])
+        # --- END OF FIX ---
+            
     else:
         st.warning(f"No shot data found for the selected date: {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
