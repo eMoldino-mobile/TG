@@ -138,7 +138,7 @@ class WarrantyFilter:
         return {"processed_df": df, "summary_metrics": summary}
 
 # --- Plotting Function ---
-def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
+def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit, blank_upper_threshold, blank_lower_threshold):
     if df.empty:
         st.info("No data to display for the selected date.")
         return go.Figure()
@@ -231,6 +231,13 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
                   annotation_text="Upper Tolerance", annotation_position="top right")
     fig.add_hline(y=lower_limit, line_dash="dash", line_color="orange",
                   annotation_text="Lower Tolerance", annotation_position="bottom right")
+    
+    # --- NEW: Add Blank Shot Threshold Lines ---
+    fig.add_hline(y=blank_upper_threshold, line_dash="dot", line_color="#7f8c8d", line_width=1,
+                  annotation_text="Blank Shot Upper", annotation_position="top right")
+    fig.add_hline(y=blank_lower_threshold, line_dash="dot", line_color="#7f8c8d", line_width=1,
+                  annotation_text="Blank Shot Lower", annotation_position="bottom left")
+    # --- End of New Section ---
     
     pause_times = df[df['is_pause_before']]['shot_time']
     for p_time in pause_times:
@@ -403,7 +410,14 @@ if uploaded_file:
         cols2[5].metric("Blank Shot - Excluded", f"{summary_metrics.get('Blank Shot - Excluded', 0):,}")
 
         st.subheader("Shot Visualization")
-        fig = plot_shot_analysis(processed_df, analyzer.approved_ct, analyzer.ct_upper_limit, analyzer.ct_lower_limit)
+        fig = plot_shot_analysis(
+            processed_df, 
+            analyzer.approved_ct, 
+            analyzer.ct_upper_limit, 
+            analyzer.ct_lower_limit,
+            analyzer.blank_shot_upper_threshold, # NEW
+            analyzer.blank_shot_lower_threshold # NEW
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("View Detailed Shot Data"):
