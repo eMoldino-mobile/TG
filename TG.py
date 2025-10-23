@@ -257,7 +257,12 @@ if uploaded_file:
         blank_shot_lower_seconds = approved_ct * (1 - blank_shot_lower_dev_pct / 100)
         st.sidebar.markdown(f"> _Corresponds to: **{blank_shot_lower_seconds:.2f} seconds**_")
         
-        startup_shots_count = st.slider("Startup Shots to Discount", 0, 50, 5)
+        # --- FIX IS HERE ---
+        startup_shots_count = st.slider(
+            "Startup Shot Window (shots)", 0, 50, 5,
+            help="The number of shots to check *after* a pause. Any bad shots within this window will be classified as 'Startup - Bad'."
+        )
+        # --- END OF FIX ---
         stable_period_shots = st.slider("Stable Production Window (shots)", 1, 100, 10)
         
     st.sidebar.markdown("---")
