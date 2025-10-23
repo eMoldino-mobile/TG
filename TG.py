@@ -15,6 +15,7 @@ STATUS_COLORS = {
     'Bad (Post-Pause)': '#3498db',
     'Blank Shot - Excluded': '#9b59b6'
 }
+SHOT_TYPES = list(STATUS_COLORS.keys())
 
 # --- Core Calculation Class ---
 class WarrantyFilter:
@@ -24,7 +25,9 @@ class WarrantyFilter:
     """
     def __init__(self, df: pd.DataFrame, approved_ct: float, pause_minutes: int,
                  ct_upper_pct: float, ct_lower_pct: float, startup_shots_count: int,
-                 stable_period_shots: int, blank_shot_upper_dev_pct: float, blank_shot_lower_dev_pct: float):
+                 stable_period_shots: int, blank_shot_upper_dev_pct: float, 
+                 blank_shot_lower_dev_pct: float, shot_config: dict):
+        
         self.df_raw = df.copy()
         self.approved_ct = approved_ct
         self.pause_minutes = pause_minutes
@@ -32,10 +35,9 @@ class WarrantyFilter:
         self.ct_lower_limit = approved_ct * (1 - ct_lower_pct / 100)
         self.startup_shots_count = startup_shots_count
         self.stable_period_shots = stable_period_shots
-        # Convert deviation percentages to absolute second thresholds
         self.blank_shot_upper_threshold = approved_ct * (1 + blank_shot_upper_dev_pct / 100)
         self.blank_shot_lower_threshold = approved_ct * (1 - blank_shot_lower_dev_pct / 100)
-        self.results = self._analyze_shots()
+        self.shot_config = shot_config # New: Store the configuration
 
     def _prepare_data(self) -> pd.DataFrame:
         """Prepares the raw DataFrame for analysis."""
@@ -54,15 +56,20 @@ class WarrantyFilter:
         df["time_diff_minutes"].fillna(0, inplace=True)
         return df
 
-    def _analyze_shots(self) -> dict:
-        """Runs the full analysis and classification logic."""
+    def analyze_shots(self) -> dict:
+        """
+        Runs the full analysis, classification, and configuration logic.
+        This is now separated from __init__.
+        """
         df = self._prepare_data()
         if df.empty:
             return {}
 
+        # --- Steps 1-5: CLASSIFICATION ---
+        # This logic now *only* sets the 'part_status' string.
+        
         # 1. Default classification
         df['part_status'] = 'Good'
-        df['affects_warranty'] = True
         
         # 2. Flag all bad cycles initially
         is_bad_cycle = (df['actual_ct'] > self.ct_upper_limit) | (df['actual_ct'] < self.ct_lower_limit)
@@ -71,42 +78,53 @@ class WarrantyFilter:
         # 3. Identify Blank Shots (Highest Priority)
         is_blank_shot = (df['actual_ct'] > self.blank_shot_upper_threshold) | (df['actual_ct'] < self.blank_shot_lower_threshold)
         df.loc[is_blank_shot, 'part_status'] = 'Blank Shot - Excluded'
-        df.loc[is_blank_shot, 'affects_warranty'] = False
         
         # 4. Identify and re-classify Startup Shots
         df['is_pause_before'] = df['time_diff_minutes'] > self.pause_minutes
         pause_indices = df[df['is_pause_before']].index
 
         for idx in pause_indices:
-            # The startup window starts AT the shot preceded by a pause
             startup_range_start = idx 
-            # The window includes 'startup_shots_count' number of shots
             startup_range_end = min(idx + self.startup_shots_count, len(df)) 
             
             for startup_idx in range(startup_range_start, startup_range_end):
                 # We only re-classify shots that are currently 'Bad (Post-Pause)'
                 if df.loc[startup_idx, 'part_status'] == 'Bad (Post-Pause)':
                     df.loc[startup_idx, 'part_status'] = 'Startup - Bad'
-                    df.loc[startup_idx, 'affects_warranty'] = False
 
         # 5. Identify Scrap Shots from the remaining bad cycles
         # A shot is scrap if it's still 'Bad (Post-Pause)' and occurs in a stable window.
         df['pause_in_window'] = df['is_pause_before'].rolling(window=self.stable_period_shots, min_periods=1).max()
         is_stable = df['pause_in_window'] != 1.0
         
-        is_scrap = (df['part_status'] == 'Bad (Post-Pause)') & is_stable
-        df.loc[is_scrap, 'part_status'] = 'Scrap'
+        is_scrap_classification = (df['part_status'] == 'Bad (Post-Pause)') & is_stable
+        df.loc[is_scrap_classification, 'part_status'] = 'Scrap'
         
+        
+        # --- Step 6: CONFIGURATION (Apply Consequences) ---
+        # Apply the user-defined settings based on the classification
+        
+        is_scrap_map = {status: props['is_scrap'] for status, props in self.shot_config.items()}
+        affects_warranty_map = {status: props['affects_warranty'] for status, props in self.shot_config.items()}
+
+        df['is_scrap'] = df['part_status'].map(is_scrap_map).fillna(False).astype(bool)
+        df['affects_warranty'] = df['part_status'].map(affects_warranty_map).fillna(False).astype(bool)
+
+
         # --- Summarize Results ---
         total_shots = len(df)
         summary = {
+            # Final outcomes based on configuration
             "Total Accumulated Shots": total_shots,
             "Adjusted Accumulated Shots (Affects Warranty)": int(df['affects_warranty'].sum()),
-            "Good Parts": (df['part_status'] == 'Good').sum(),
-            "Scrap Parts": (df['part_status'] == 'Scrap').sum(),
-            "Discounted Startup Shots (Bad)": (df['part_status'] == 'Startup - Bad').sum(),
-            "Blank Shots (Excluded)": (df['part_status'] == 'Blank Shot - Excluded').sum(),
-            "Other Bad Cycles (Post-Pause)": (df['part_status'] == 'Bad (Post-Pause)').sum()
+            "Total Scrap Parts (from Config)": int(df['is_scrap'].sum()),
+            
+            # Raw classification counts
+            "Good": (df['part_status'] == 'Good').sum(),
+            "Scrap": (df['part_status'] == 'Scrap').sum(), # Note: This is the *classification*
+            "Startup - Bad": (df['part_status'] == 'Startup - Bad').sum(),
+            "Bad (Post-Pause)": (df['part_status'] == 'Bad (Post-Pause)').sum(),
+            "Blank Shot - Excluded": (df['part_status'] == 'Blank Shot - Excluded').sum()
         }
         
         return {"processed_df": df, "summary_metrics": summary}
@@ -125,7 +143,21 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         y=df['actual_ct'],
         marker_color=df['color'],
         name='Cycle Time',
-        showlegend=False
+        showlegend=False,
+        # Add customdata for hover
+        customdata=np.stack((
+            df['part_status'], 
+            df['is_scrap'], 
+            df['affects_warranty']
+        ), axis=-1),
+        hovertemplate=(
+            '<b>Shot Time</b>: %{x}<br>'
+            '<b>Actual CT</b>: %{y:.2f}s<br>'
+            '<b>Classification</b>: %{customdata[0]}<br>'
+            '<b>Is Scrap?</b>: %{customdata[1]}<br>'
+            '<b>Affects Warranty?</b>: %{customdata[2]}'
+            '<extra></extra>' # Hides the trace name
+        )
     ))
 
     for status, color in STATUS_COLORS.items():
@@ -151,12 +183,13 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
     y_axis_max = max(df['actual_ct'].max() * 1.1, upper_limit * 1.5) if not df.empty else approved_ct * 2
     
     fig.update_layout(
-        title="Shot-by-Shot Cycle Time Analysis",
+        title="Shot-by-Shot Cycle Time Analysis (Hover for Details)",
         xaxis_title="Shot Time",
         yaxis_title="Actual Cycle Time (seconds)",
         yaxis_range=[0, y_axis_max],
         legend_title_text='Legend',
-        bargap=0.1
+        bargap=0.1,
+        hovermode="x unified"
     )
     return fig
 
@@ -224,10 +257,49 @@ if uploaded_file:
         startup_shots_count = st.slider("Startup Shots to Discount", 0, 50, 5)
         stable_period_shots = st.slider("Stable Production Window (shots)", 1, 100, 10)
         
+    st.sidebar.markdown("---")
+    
+    # --- NEW: Shot Type Configuration ---
+    # Set default configurations based on the *original* logic
+    DEFAULT_CONFIGS = {
+        'Good': {'is_scrap': False, 'affects_warranty': True},
+        'Scrap': {'is_scrap': True, 'affects_warranty': True},
+        'Startup - Bad': {'is_scrap': False, 'affects_warranty': False},
+        'Bad (Post-Pause)': {'is_scrap': False, 'affects_warranty': True},
+        'Blank Shot - Excluded': {'is_scrap': False, 'affects_warranty': False}
+    }
+
+    shot_config = {}
+    with st.sidebar.expander("Shot Type Property Configuration", expanded=True):
+        st.caption("Configure the final properties for each classified shot type.")
+        for shot_type in SHOT_TYPES:
+            st.markdown(f"**{shot_type}**")
+            cols = st.columns(2)
+            default_props = DEFAULT_CONFIGS[shot_type]
+            is_scrap = cols[0].checkbox(
+                "Is Scrap?", 
+                default_props['is_scrap'], 
+                key=f"{shot_type}_scrap",
+                help=f"Mark '{shot_type}' shots as scrap?"
+            )
+            affects_warranty = cols[1].checkbox(
+                "Affects Warranty?", 
+                default_props['affects_warranty'], 
+                key=f"{shot_type}_warranty",
+                help=f"Count '{shot_type}' shots towards warranty?"
+            )
+            shot_config[shot_type] = {
+                'is_scrap': is_scrap, 
+                'affects_warranty': affects_warranty
+            }
+    
+    # --- End of New Config Section ---
+    
     st.header(f"Analysis Results for {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
     df_filtered = df_input[df_input['date'] == selected_date].copy()
 
+    # Instantiate the analyzer with the new config
     analyzer = WarrantyFilter(
         df=df_filtered,
         approved_ct=approved_ct,
@@ -237,27 +309,32 @@ if uploaded_file:
         startup_shots_count=startup_shots_count,
         stable_period_shots=stable_period_shots,
         blank_shot_upper_dev_pct=blank_shot_upper_dev_pct,
-        blank_shot_lower_dev_pct=blank_shot_lower_dev_pct
+        blank_shot_lower_dev_pct=blank_shot_lower_dev_pct,
+        shot_config=shot_config  # Pass the new config
     )
-    results = analyzer.results
+    # Run the analysis
+    results = analyzer.analyze_shots()
     
     if results and not results.get("processed_df", pd.DataFrame()).empty:
         summary_metrics = results.get("summary_metrics", {})
         processed_df = results.get("processed_df", pd.DataFrame())
 
-        st.subheader("Summary")
-        cols = st.columns(4)
+        st.subheader("Summary (Based on Configuration)")
+        cols = st.columns(3)
         cols[0].metric("Total Accumulated Shots", f"{summary_metrics.get('Total Accumulated Shots', 0):,}")
         cols[1].metric("Adjusted Shots (Affects Warranty)", f"{summary_metrics.get('Adjusted Accumulated Shots (Affects Warranty)', 0):,}")
-        cols[2].metric("Good Parts", f"{summary_metrics.get('Good Parts', 0):,}")
-        cols[3].metric("Scrap Parts", f"{summary_metrics.get('Scrap Parts', 0):,}")
+        cols[2].metric("Total Scrap Parts (from Config)", f"{summary_metrics.get('Total Scrap Parts (from Config)', 0):,}")
         
         st.markdown("---")
         
-        cols2 = st.columns(3)
-        cols2[0].metric("Discounted Startup Shots", f"{summary_metrics.get('Discounted Startup Shots (Bad)', 0):,}")
-        cols2[1].metric("Blank Shots (Excluded)", f"{summary_metrics.get('Blank Shots (Excluded)', 0):,}")
-        cols2[2].metric("Other Bad Cycles", f"{summary_metrics.get('Other Bad Cycles (Post-Pause)', 0):,}")
+        st.subheader("Shot Classification Counts")
+        st.caption("These are the raw counts *before* your configuration is applied.")
+        cols2 = st.columns(5)
+        cols2[0].metric("Good", f"{summary_metrics.get('Good', 0):,}")
+        cols2[1].metric("Scrap (Classified)", f"{summary_metrics.get('Scrap', 0):,}")
+        cols2[2].metric("Startup - Bad", f"{summary_metrics.get('Startup - Bad', 0):,}")
+        cols2[3].metric("Bad (Post-Pause)", f"{summary_metrics.get('Bad (Post-Pause)', 0):,}")
+        cols2[4].metric("Blank Shot - Excluded", f"{summary_metrics.get('Blank Shot - Excluded', 0):,}")
 
         st.subheader("Shot Visualization")
         fig = plot_shot_analysis(processed_df, analyzer.approved_ct, analyzer.ct_upper_limit, analyzer.ct_lower_limit)
@@ -265,25 +342,21 @@ if uploaded_file:
 
         with st.expander("View Detailed Shot Data"):
             df_display = processed_df.copy()
+            # Rename columns for clarity in the table
             df_display.rename(columns={
                 'shot_time': 'Shot Time', 'actual_ct': 'Actual CT',
-                'part_status': 'Part Status', 'affects_warranty': 'Affects Warranty',
-                'time_diff_minutes': 'Minutes Since Last Shot', 'is_pause_before': 'Preceded by Pause'
+                'part_status': 'Classification', 
+                'is_scrap': 'Is Scrap? (Config)', 
+                'affects_warranty': 'Affects Warranty? (Config)',
+                'time_diff_minutes': 'Minutes Since Last Shot', 
+                'is_pause_before': 'Preceded by Pause'
             }, inplace=True)
             st.dataframe(df_display[[
-                'Shot Time', 'Actual CT', 'Part Status', 'Affects Warranty', 
-                'Minutes Since Last Shot', 'Preceded by Pause'
-            ]])
+                'Shot Time', 'Actual CT', 'Classification', 'Is Scrap? (Config)', 
+                'Affects Warranty? (Config)', 'Minutes Since Last Shot', 'Preceded by Pause'
+            ] + [col for col in df_input.columns if col not in df_display.columns and col not in ['date', 'approved_ct']]]) # Show original columns too
     else:
         st.warning(f"No shot data found for the selected date: {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
 else:
     st.info("👈 Please upload an Excel file to begin the analysis.")
-    
-    
-    
-    
-    
-    
-    
-
