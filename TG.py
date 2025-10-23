@@ -166,7 +166,7 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
     
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode='lines',
-        line=dict(color='purple', dash='dash', width=1.E_m_c_2),
+        line=dict(color='purple', dash='dash', width=1.5), # <-- FIX was here
         name='Production Pause', showlegend=True
     ))
 
@@ -392,3 +392,4 @@ if uploaded_file:
 
 else:
     st.info("👈 Please upload an Excel file to begin the analysis.")
+
