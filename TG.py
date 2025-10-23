@@ -10,6 +10,7 @@ st.set_page_config(layout="wide", page_title="Warranty & EOL Shot Filter")
 # --- Color Constants ---
 STATUS_COLORS = {
     'Good': '#2ecc71',
+    'Startup - Good': '#f1c40f', # New Classification Color
     'Scrap': '#e74c3c',
     'Startup - Bad': '#f39c12',
     'Bad (Post-Pause)': '#3498db',
@@ -80,7 +81,7 @@ class WarrantyFilter:
         is_blank_shot = (df['actual_ct'] > self.blank_shot_upper_threshold) | (df['actual_ct'] < self.blank_shot_lower_threshold)
         df.loc[is_blank_shot, 'part_status'] = 'Blank Shot - Excluded'
         
-        # 4. Identify and re-classify Startup Shots
+        # 4. Identify and re-classify Startup Shots (UPDATED LOGIC)
         df['is_pause_before'] = df['time_diff_minutes'] > self.pause_minutes
         pause_indices = df[df['is_pause_before']].index
 
@@ -89,8 +90,13 @@ class WarrantyFilter:
             startup_range_end = min(idx + self.startup_shots_count, len(df)) 
             
             for startup_idx in range(startup_range_start, startup_range_end):
-                # We only re-classify shots that are currently 'Bad (Post-Pause)'
-                if df.loc[startup_idx, 'part_status'] == 'Bad (Post-Pause)':
+                current_status = df.loc[startup_idx, 'part_status']
+                
+                # Re-classify BOTH 'Good' and 'Bad (Post-Pause)' shots
+                # Leaves 'Blank Shot - Excluded' alone.
+                if current_status == 'Good':
+                    df.loc[startup_idx, 'part_status'] = 'Startup - Good'
+                elif current_status == 'Bad (Post-Pause)':
                     df.loc[startup_idx, 'part_status'] = 'Startup - Bad'
 
         # 5. Identify Scrap Shots from the remaining bad cycles
@@ -120,9 +126,10 @@ class WarrantyFilter:
             "Adjusted Accumulated Shots (Affects Warranty)": int(df['affects_warranty'].sum()),
             "Total Scrap Parts (from Config)": int(df['is_scrap'].sum()),
             
-            # Raw classification counts
+            # Raw classification counts (UPDATED)
             "Good": (df['part_status'] == 'Good').sum(),
             "Scrap": (df['part_status'] == 'Scrap').sum(), # Note: This is the *classification*
+            "Startup - Good": (df['part_status'] == 'Startup - Good').sum(), # New
             "Startup - Bad": (df['part_status'] == 'Startup - Bad').sum(),
             "Bad (Post-Pause)": (df['part_status'] == 'Bad (Post-Pause)').sum(),
             "Blank Shot - Excluded": (df['part_status'] == 'Blank Shot - Excluded').sum()
@@ -161,12 +168,13 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         )
     ))
 
+    # This loop now picks up the new 'Startup - Good' category
     for status, color in STATUS_COLORS.items():
         fig.add_trace(go.Bar(x=[None], y=[None], marker_color=color, name=status, showlegend=True))
     
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode='lines',
-        line=dict(color='purple', dash='dash', width=1.5), # <-- FIX was here
+        line=dict(color='purple', dash='dash', width=1.5),
         name='Production Pause', showlegend=True
     ))
 
@@ -202,7 +210,7 @@ uploaded_file = st.sidebar.file_uploader("Upload your shot data Excel file", typ
 
 if uploaded_file:
     df_input = pd.read_excel(uploaded_file)
-    # Store original columns before standardizing
+    # Store original columns before standardized
     original_columns = list(df_input.columns) 
     df_input.columns = [col.strip().lower().replace(' ', '_') for col in df_input.columns]
 
@@ -257,12 +265,10 @@ if uploaded_file:
         blank_shot_lower_seconds = approved_ct * (1 - blank_shot_lower_dev_pct / 100)
         st.sidebar.markdown(f"> _Corresponds to: **{blank_shot_lower_seconds:.2f} seconds**_")
         
-        # --- FIX IS HERE ---
         startup_shots_count = st.slider(
             "Startup Shot Window (shots)", 0, 50, 5,
-            help="The number of shots to check *after* a pause. Any bad shots within this window will be classified as 'Startup - Bad'."
+            help="The number of shots to check *after* a pause. Any good or bad shots within this window will be classified as 'Startup'."
         )
-        # --- END OF FIX ---
         stable_period_shots = st.slider("Stable Production Window (shots)", 1, 100, 10)
         
     st.sidebar.markdown("---")
@@ -271,6 +277,7 @@ if uploaded_file:
     # Set default configurations based on the *original* logic
     DEFAULT_CONFIGS = {
         'Good': {'is_scrap': False, 'affects_warranty': True},
+        'Startup - Good': {'is_scrap': False, 'affects_warranty': False}, # New Default
         'Scrap': {'is_scrap': True, 'affects_warranty': True},
         'Startup - Bad': {'is_scrap': False, 'affects_warranty': False},
         'Bad (Post-Pause)': {'is_scrap': False, 'affects_warranty': True},
@@ -280,6 +287,8 @@ if uploaded_file:
     shot_config = {}
     with st.sidebar.expander("Shot Type Property Configuration", expanded=True):
         st.caption("Configure the final properties for each classified shot type.")
+        
+        # This loop now automatically includes 'Startup - Good'
         for shot_type in SHOT_TYPES:
             st.markdown(f"**{shot_type}**")
             cols = st.columns(2)
@@ -305,9 +314,6 @@ if uploaded_file:
     
     st.header(f"Analysis Results for {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
-    # We pass the original df_input columns to the filter
-    # The filter class will only use what it needs (shot_time, actual_ct)
-    # but it will carry over the rest of the columns
     df_filtered = df_input[df_input['date'] == selected_date].copy()
 
     # Instantiate the analyzer with the new config
@@ -321,7 +327,7 @@ if uploaded_file:
         stable_period_shots=stable_period_shots,
         blank_shot_upper_dev_pct=blank_shot_upper_dev_pct,
         blank_shot_lower_dev_pct=blank_shot_lower_dev_pct,
-        shot_config=shot_config  # Pass the new config
+        shot_config=shot_config
     )
     # Run the analysis
     results = analyzer.analyze_shots()
@@ -340,22 +346,22 @@ if uploaded_file:
         
         st.subheader("Shot Classification Counts")
         st.caption("These are the raw counts *before* your configuration is applied.")
-        cols2 = st.columns(5)
+        # UPDATED to 6 columns
+        cols2 = st.columns(6) 
         cols2[0].metric("Good", f"{summary_metrics.get('Good', 0):,}")
-        cols2[1].metric("Scrap (Classified)", f"{summary_metrics.get('Scrap', 0):,}")
-        cols2[2].metric("Startup - Bad", f"{summary_metrics.get('Startup - Bad', 0):,}")
-        cols2[3].metric("Bad (Post-Pause)", f"{summary_metrics.get('Bad (Post-Pause)', 0):,}")
-        cols2[4].metric("Blank Shot - Excluded", f"{summary_metrics.get('Blank Shot - Excluded', 0):,}")
+        cols2[1].metric("Startup - Good", f"{summary_metrics.get('Startup - Good', 0):,}") # New
+        cols2[2].metric("Scrap (Classified)", f"{summary_metrics.get('Scrap', 0):,}")
+        cols2[3].metric("Startup - Bad", f"{summary_metrics.get('Startup - Bad', 0):,}")
+        cols2[4].metric("Bad (Post-Pause)", f"{summary_metrics.get('Bad (Post-Pause)', 0):,}")
+        cols2[5].metric("Blank Shot - Excluded", f"{summary_metrics.get('Blank Shot - Excluded', 0):,}")
 
         st.subheader("Shot Visualization")
         fig = plot_shot_analysis(processed_df, analyzer.approved_ct, analyzer.ct_upper_limit, analyzer.ct_lower_limit)
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- FIX IS HERE ---
         with st.expander("View Detailed Shot Data"):
             df_display = processed_df.copy()
             
-            # Define the 7 columns we are renaming
             rename_map = {
                 'shot_time': 'Shot Time', 'actual_ct': 'Actual CT',
                 'part_status': 'Classification', 
@@ -366,35 +372,20 @@ if uploaded_file:
             }
             df_display.rename(columns=rename_map, inplace=True)
             
-            # These are the 7 columns we want to show first, in order
             pretty_cols_ordered = list(rename_map.values())
-            
-            # These are the original (snake_case) names of the columns we renamed
             internal_cols_renamed = list(rename_map.keys())
             
-            # Find all *other* columns from the original file that weren't renamed
-            # and aren't the date/ct helpers.
-            # We check against df_input.columns to get all original columns.
             other_original_cols = [
                 col for col in df_input.columns 
                 if col not in internal_cols_renamed and col not in ['date', 'approved_ct']
             ]
             
-            # Combine the lists and display
-            # This ensures all original data (like 'operator_name', etc.)
-            # that was in df_input is also shown here.
-            
-            # Final check: only include other_original_cols if they actually
-            # exist in the final df_display (which they should, as they're
-            # carried over from df_raw)
             final_other_cols = [col for col in other_original_cols if col in df_display.columns]
             
             st.dataframe(df_display[pretty_cols_ordered + final_other_cols])
-        # --- END OF FIX ---
             
     else:
         st.warning(f"No shot data found for the selected date: {pd.to_datetime(selected_date).strftime('%d %b %Y')}")
 
 else:
     st.info("👈 Please upload an Excel file to begin the analysis.")
-
