@@ -168,9 +168,56 @@ def plot_shot_analysis(df, approved_ct, upper_limit, lower_limit):
         )
     ))
 
+    # --- NEW: Add symbol tags for Scrap and No Warranty ---
+    
+    # 1. Add 'X' for Scrap shots (data trace, no legend)
+    df_scrap = df[df['is_scrap'] == True]
+    fig.add_trace(go.Scatter(
+        x=df_scrap['shot_time'],
+        y=df_scrap['actual_ct'],
+        mode='markers',
+        marker_symbol='x-thin',
+        marker_color='#c0392b', # Dark red
+        marker_size=8,
+        marker_line_width=2,
+        name='Scrap Symbol',
+        showlegend=False,
+        hoverinfo='none' # Let the bar's hovertemplate handle it
+    ))
+
+    # 2. Add 'O' for "Warranty Not Affected" shots (data trace, no legend)
+    df_no_warranty = df[df['affects_warranty'] == False]
+    fig.add_trace(go.Scatter(
+        x=df_no_warranty['shot_time'],
+        y=df_no_warranty['actual_ct'],
+        mode='markers',
+        marker_symbol='circle-open',
+        marker_color='#2c3e50', # Dark blue/grey
+        marker_size=10,
+        marker_line_width=2,
+        name='No Warranty Symbol',
+        showlegend=False,
+        hoverinfo='none' # Let the bar's hovertemplate handle it
+    ))
+    
+    # --- End of New Section ---
+
     # This loop now picks up the new 'Startup - Good' category
     for status, color in STATUS_COLORS.items():
         fig.add_trace(go.Bar(x=[None], y=[None], marker_color=color, name=status, showlegend=True))
+    
+    # --- NEW: Add dummy traces for symbol legends ---
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None], mode='markers',
+        marker_symbol='x-thin', marker_color='#c0392b', marker_size=8, marker_line_width=2,
+        name='Scrap (Config)'
+    ))
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None], mode='markers',
+        marker_symbol='circle-open', marker_color='#2c3e50', marker_size=10, marker_line_width=2,
+        name='Warranty Not Affected (Config)'
+    ))
+    # --- End of New Section ---
     
     fig.add_trace(go.Scatter(
         x=[None], y=[None], mode='lines',
@@ -389,3 +436,4 @@ if uploaded_file:
 
 else:
     st.info("👈 Please upload an Excel file to begin the analysis.")
+
